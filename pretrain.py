@@ -8,51 +8,58 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-import torch.optim
 import torch.utils.data
-import utils.warmup_scheduler as optim_warmup
-from feeder import feeder_pretraining
+
 import torch.distributed as dist
 
+import utils.warmup_scheduler as optim_warmup
+from feeder import feeder_pretraining
 import misc
-
 import moco.builder_dist
 from torch.utils.tensorboard import SummaryWriter
 from dataset import get_pretraining
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+
+parser = argparse.ArgumentParser(description='MASA Pretraining')
+
+# workers (accept both --workers and --worker)
 parser.add_argument('-j', '--workers', default=2, type=int, metavar='N',
-                    help='number of data loading workers (default: 32)')
+                    help='number of data loading workers (default: 2)')
+parser.add_argument('--worker', dest='workers', type=int,
+                    help='alias for --workers')
+
 parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
-                    metavar='N',
-                    help='mini-batch size (default: 256), this is the total '
-                         'batch size of all GPUs on the current node when '
-                         'using Data Parallel or Distributed Data Parallel')
+
+parser.add_argument('-b', '--batch-size', default=256, type=int, metavar='N',
+                    help='mini-batch size')
+
 parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
-parser.add_argument('--schedule', default=[100, 160], nargs='*', type=int,
-                    help='learning rate schedule (when to drop lr by 10x)')
-parser.add_argument('--optim', type=str, help='the optimizer type for pretrain')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                    help='momentum of SGD solver')
-parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)',
-                    dest='weight_decay')
-parser.add_argument('-p', '--print-freq', default=10, type=int,
-                    metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
 
-# Distributed
+parser.add_argument('--schedule', default=[100, 160], nargs='*', type=int,
+                    help='lr schedule milestones')
+parser.add_argument('--optim', type=str, default='AdamW',
+                    help='optimizer type: SGD or AdamW')
+parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+                    help='momentum of SGD')
+
+parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
+                    metavar='W', help='weight decay', dest='weight_decay')
+
+parser.add_argument('-p', '--print-freq', default=10, type=int,
+                    metavar='N', help='print frequency')
+
+parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                    help='path to latest checkpoint')
+
+# distributed
 parser.add_argument('--world_size', default=1, type=int,
                     help='number of distributed processes')
-parser.add_argument('--local_rank', default=-1, type=int)
+parser.add_argument('--local-rank', default=-1, type=int)
 parser.add_argument('--dist_on_itp', action='store_true')
 parser.add_argument('--dist_url', default='env://',
                     help='url used to set up distributed training')
@@ -60,92 +67,100 @@ parser.add_argument('--dist_url', default='env://',
 parser.add_argument('--device', default='cuda',
                     help='device to use for training / testing')
 parser.add_argument('--seed', default=42, type=int,
-                    help='seed for initializing training. ')
+                    help='seed for initializing training')
 parser.add_argument('--checkpoint-path', default='./checkpoints', type=str)
-parser.add_argument('--skeleton-representation', type=str,
-                    help='input skeleton-representation  for self supervised training (image-based or graph-based or seq-based)')
-parser.add_argument('--pre-dataset', type=str,
-                    help='which dataset to use for self supervised training')
 
-# contrast specific configs:
-parser.add_argument('--contrast-dim', default=128, type=int,
-                    help='feature dimension (default: 128)')
-parser.add_argument('--contrast-k', default=32768, type=int,
-                    help='queue size; number of negative keys (default: 16384)')
-parser.add_argument('--contrast-m', default=0.999, type=float,
-                    help='contrast momentum of updating key encoder (default: 0.999)')
-parser.add_argument('--contrast-t', default=0.07, type=float,
-                    help='softmax temperature (default: 0.07)')
-parser.add_argument('--teacher-t', default=0.05, type=float,
-                    help='softmax temperature (default: 0.05)')
-parser.add_argument('--student-t', default=0.1, type=float,
-                    help='softmax temperature (default: 0.1)')
-parser.add_argument('--inter-weight', default=0.5, type=float,
-                    help='weight of inter consistency loss (default: 0.5)')
-parser.add_argument('--topk', default=1024, type=int,
-                    help='number of contrastive context')
-parser.add_argument('--mlp', action='store_true',
-                    help='use mlp head')
-parser.add_argument('--cos', action='store_true',
-                    help='use cosine lr schedule')
-parser.add_argument('--inter-dist', action='store_true',
-                    help='use inter distillation loss')
-parser.add_argument('--warmup', action='store_true',
-                    help='use warmup optmizing')
-parser.add_argument('--contrast_weight', type=float,
-                    help='weight of Contrastive Loss')
-parser.add_argument('--mask_ratio', type=float,
-                    help='mask ratio for main backbone')
+parser.add_argument('--skeleton-representation', type=str, required=True,
+                    help='graph-based / image-based / seq-based')
+parser.add_argument('--pre-dataset', type=str, required=True,
+                    help='which dataset protocol to use (keep SLR for this repo)')
+
+# contrastive configs
+parser.add_argument('--contrast-dim', default=128, type=int)
+parser.add_argument('--contrast-k', default=32768, type=int)
+parser.add_argument('--contrast-m', default=0.999, type=float)
+parser.add_argument('--contrast-t', default=0.07, type=float)
+parser.add_argument('--teacher-t', default=0.05, type=float)
+parser.add_argument('--student-t', default=0.1, type=float)
+parser.add_argument('--inter-weight', default=0.5, type=float)
+parser.add_argument('--topk', default=1024, type=int)
+
+parser.add_argument('--mlp', action='store_true')
+parser.add_argument('--cos', action='store_true')
+parser.add_argument('--inter-dist', action='store_true')
+parser.add_argument('--warmup', action='store_true')
+parser.add_argument('--contrast_weight', type=float, default=0.05)
+parser.add_argument('--mask_ratio', type=float, default=0.9)
 
 
 def main():
     args = parser.parse_args()
     misc.init_distributed_mode(args)
 
-    device = torch.device(args.device)
+    # ---- make these ALWAYS defined ----
+    global_rank = misc.get_rank()
+    args.gpu = getattr(args, "gpu", None)  # in DDP, misc.init_distributed_mode usually sets args.gpu
+    device = torch.device(args.device if args.device else "cuda")
 
-    # fix the seed for reproducibility
-    seed = args.seed + misc.get_rank()
+    # if not distributed, put everything on cuda:0
+    if not getattr(args, "distributed", False):
+        if device.type == "cuda":
+            torch.cuda.set_device(0)
+
+    # seed
+    seed = args.seed + global_rank
     torch.manual_seed(seed)
     np.random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
-    # pretraining dataset and protocol
+    # protocol / options
     from options import options_pretraining as options
     if args.pre_dataset == 'SLR':
         opts = options.opts_SLR()
+    else:
+        raise ValueError(f"Unsupported pre-dataset: {args.pre_dataset}")
 
     opts.train_feeder_args['input_representation'] = args.skeleton_representation
     opts.train_feeder_args['mask_ratio'] = args.mask_ratio
 
-    # create model
+    print("Not using distributed mode" if not args.distributed else "Using distributed mode")
     print("=> creating model")
-    model = moco.builder_dist.MASA(args.skeleton_representation, opts.num_class,
-                                       args.contrast_dim, args.contrast_k, args.contrast_m, args.contrast_t,
-                                       args.teacher_t, args.student_t, args.topk, args.mlp, inter_weight=args.inter_weight,
-                                       inter_dist=args.inter_dist)
+    model = moco.builder_dist.MASA(
+        args.skeleton_representation, opts.num_class,
+        args.contrast_dim, args.contrast_k, args.contrast_m, args.contrast_t,
+        args.teacher_t, args.student_t, args.topk, args.mlp,
+        inter_weight=args.inter_weight,
+        inter_dist=args.inter_dist
+    )
+
     print("options", opts.train_feeder_args)
     print(model)
 
     model.to(device)
+
     if args.distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = nn.parallel.distributed.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-        model_without_ddp = model.module
+        # args.gpu should exist in distributed mode; fallback to local_rank
+        if args.gpu is None:
+            args.gpu = args.local_rank if args.local_rank >= 0 else 0
+        model = nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.gpu], find_unused_parameters=True
+        )
         print('Distributed data parallel model used')
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    # ---- FIX 1: criterion must NOT depend on args.gpu ----
+    criterion = nn.CrossEntropyLoss().to(device)
 
-    ## Data loading code
+    # dataset
     train_dataset = get_pretraining(opts)
 
     if args.distributed:
         num_tasks = misc.get_world_size()
-        global_rank = misc.get_rank()
         train_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_dataset, num_replicas=num_tasks, rank=global_rank, shuffle=True)
+            train_dataset, num_replicas=num_tasks, rank=global_rank, shuffle=True
+        )
     else:
         train_sampler = None
 
@@ -155,45 +170,73 @@ def main():
         random.seed(worker_seed)
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), num_workers=args.workers,
-        worker_init_fn=worker_init_fn, pin_memory=True, sampler=train_sampler, drop_last=True, collate_fn=feeder_pretraining.collate_fn)
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        num_workers=args.workers,
+        worker_init_fn=worker_init_fn,
+        pin_memory=True,
+        sampler=train_sampler,
+        drop_last=True,
+        collate_fn=feeder_pretraining.collate_fn
+    )
 
-    if args.optim == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                    momentum=args.momentum,
-                                    weight_decay=args.weight_decay)
+    # optimizer
+    if args.optim.upper() == 'SGD':
+        optimizer = torch.optim.SGD(
+            model.parameters(), args.lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay
+        )
         print(">>> using SGD optimizer!")
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), args.lr,
-                                    weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), args.lr,
+            weight_decay=args.weight_decay
+        )
         print(">>> using AdamW optimizer!")
 
+    # ---- FIX 2: always define a scheduler (warmup or normal) ----
     if args.warmup:
-        scheduler_steplr = torch.optim.lr_scheduler.MultiStepLR(optimizer, gamma=0.5, milestones=[100, 200, 300, 350])
-        scheduler = optim_warmup.GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=20, after_scheduler=scheduler_steplr)
-        print(">>> using warmup and exponential learning reducing!")
+        scheduler_steplr = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, gamma=0.5, milestones=[100, 200, 300, 350]
+        )
+        scheduler = optim_warmup.GradualWarmupScheduler(
+            optimizer, multiplier=1, total_epoch=20, after_scheduler=scheduler_steplr
+        )
+        print(">>> using warmup + MultiStepLR")
+    else:
+        if args.cos:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+            print(">>> using CosineAnnealingLR")
+        else:
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer, milestones=args.schedule, gamma=0.1
+            )
+            print(">>> using MultiStepLR milestones:", args.schedule)
 
-    # optionally resume from a checkpoint
+    # resume
     if args.resume:
         if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            # Map model to be loaded to specified single gpu.
+            print(f"=> loading checkpoint '{args.resume}'")
             checkpoint = torch.load(args.resume, map_location='cpu')
-            args.start_epoch = checkpoint['epoch']
+            args.start_epoch = checkpoint.get('epoch', 0)
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+            print(f"=> loaded checkpoint (epoch {args.start_epoch})")
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print(f"=> no checkpoint found at '{args.resume}'")
 
+    # writer
     if global_rank == 0:
+        os.makedirs(args.checkpoint_path, exist_ok=True)
         writer = SummaryWriter(log_dir=args.checkpoint_path)
     else:
         writer = None
 
     scaler = torch.cuda.amp.GradScaler()
     autocast = torch.cuda.amp.autocast
+
     max_lambda_CL = args.contrast_weight
     max_lambda_epoch = 100
 
@@ -201,17 +244,19 @@ def main():
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        if args.optim == 'SGD' and not args.warmup:
-            adjust_learning_rate(optimizer, epoch, args)
-        else:
+        # step LR
+        if args.warmup:
             scheduler.step(epoch)
+        else:
+            scheduler.step()
 
         lambda_CL = min(max_lambda_CL * (epoch / max_lambda_epoch), max_lambda_CL)
 
-        # train for one epoch
-        loss_joint, top1_joint, loss_hand_2d, loss_body_2d = train(train_loader, model, criterion, optimizer, epoch, autocast, scaler, lambda_CL, args)
+        loss_joint, top1_joint, loss_hand_2d, loss_body_2d = train(
+            train_loader, model, criterion, optimizer, epoch, autocast, scaler, lambda_CL, args, device
+        )
 
-        if global_rank == 0:
+        if writer is not None:
             writer.add_scalar('loss_joint', loss_joint.avg, global_step=epoch)
             writer.add_scalar('loss_hand_2d', loss_hand_2d.avg, global_step=epoch)
             writer.add_scalar('loss_body_2d', loss_body_2d.avg, global_step=epoch)
@@ -223,68 +268,62 @@ def main():
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                }, is_best=False, filename=args.checkpoint_path + '/checkpoint_{:04d}.pth.tar'.format(epoch))
+                }, is_best=False,
+                   filename=os.path.join(args.checkpoint_path, f'checkpoint_{epoch:04d}.pth.tar'))
 
 
-def train(train_loader, model, criterion, optimizer, epoch, autocast, scaler, lambda_CL, args):
+def train(train_loader, model, criterion, optimizer, epoch, autocast, scaler, lambda_CL, args, device):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':6.3f')
     losses_joint = AverageMeter('Loss Joint', ':6.3f')
     losses_hand_2d = AverageMeter('Loss_hand_2d', ':6.3f')
     losses_body_2d = AverageMeter('Loss_body_2d', ':6.3f')
     top1_joint = AverageMeter('Acc Joint@1', ':6.2f')
+
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, losses_joint, losses_hand_2d, losses_body_2d, top1_joint],
-        prefix="Epoch: [{}] Lr_rate [{}] lambda_CL [{}]".format(epoch, optimizer.param_groups[0]['lr'], lambda_CL))
+        prefix=f"Epoch: [{epoch}] Lr_rate [{optimizer.param_groups[0]['lr']}] lambda_CL [{lambda_CL}]"
+    )
 
-    # switch to train mode
     model.train()
-
     end = time.time()
+
     for i, (input_v1, input_v2) in enumerate(train_loader):
-        # measure data loading time
         data_time.update(time.time() - end)
+
+        # move to device
         for k, v in input_v1.items():
             for k_1, v_1 in v.items():
-                input_v1[k][k_1] = v_1.float().cuda(non_blocking=True)
+                input_v1[k][k_1] = v_1.float().to(device, non_blocking=True)
         for k, v in input_v2.items():
             for k_1, v_1 in v.items():
-                input_v2[k][k_1] = v_1.float().cuda(non_blocking=True)
+                input_v2[k][k_1] = v_1.float().to(device, non_blocking=True)
 
-        # compute output
         with autocast():
             output, target, rh_loss, lh_loss, body_loss = model(input_v1, input_v2, self_dist=args.inter_dist)
-
             batch_size = output.size(0)
 
-            # compute loss
+            target = target.to(device, non_blocking=True)
             loss_joint = criterion(output, target)
-
             loss = (lambda_CL * loss_joint) + (rh_loss + lh_loss + body_loss)
+
             if np.isinf(loss.item()) or np.isnan(loss.item()):
-                print("Nan is exist!")
+                print("Nan/Inf loss detected, skipping batch")
                 continue
 
-            losses.update(loss.item(), batch_size)
             losses_joint.update(loss_joint.item(), batch_size)
             losses_hand_2d.update((rh_loss.item() + lh_loss.item()) / 2.0, batch_size)
             losses_body_2d.update(body_loss.item(), batch_size)
 
-        # measure accuracy of model m1 and m2 individually
-        # acc1/acc5 are (K+1)-way contrast classifier accuracy
-        # measure accuracy and record loss
         acc1_joint, _ = accuracy(output, target, topk=(1, 5))
         top1_joint.update(acc1_joint[0], batch_size)
 
-        # compute gradient and do SGD step with scaler
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
-        # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -301,8 +340,6 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 
 
 class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
     def __init__(self, name, fmt=':f'):
         self.name = name
         self.fmt = fmt
@@ -342,20 +379,7 @@ class ProgressMeter(object):
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 
-def adjust_learning_rate(optimizer, epoch, args):
-    """Decay the learning rate based on schedule"""
-    lr = args.lr
-    if args.cos:  # cosine lr schedule
-        lr *= 0.5 * (1. + math.cos(math.pi * epoch / args.epochs))
-    else:  # stepwise lr schedule
-        for milestone in args.schedule:
-            lr *= 0.1 if epoch >= milestone else 1.
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-
 def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)

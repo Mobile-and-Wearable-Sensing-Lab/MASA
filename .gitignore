@@ -1,0 +1,31 @@
+# Data folder rules
+Data/ISL_GOA/Pose/
+Pose/
+
+# Keep the labels but ignore the heavy binaries
+*.npy
+*.pth
+*.tar
+checkpoints*/
+save_path/
+
+# System and Python junk
+__pycache__/
+*.pyc
+.DS_Store
+*.log1~# Data folder rules
+Data/ISL_GOA/Pose/
+Pose/
+
+# Keep the labels but ignore the heavy binaries
+*.npy
+*.pth
+*.tar
+checkpoints*/
+save_path/
+
+# System and Python junk
+__pycache__/
+*.pyc
+.DS_Store
+*.log

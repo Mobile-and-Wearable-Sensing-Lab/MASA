@@ -10,6 +10,9 @@ import numpy as np
 np.set_printoptions(threshold=np.inf)
 import random
 from feeder.SLR_Dataset import datasets
+from feeder.feeder_pretraining import *  # noqa: F401,F403
+
+
 
 try:
     from feeder import augmentations
@@ -72,7 +75,11 @@ class Feeder_SLR(torch.utils.data.Dataset):
         self.l_ratio = l_ratio
         self.mask_ratio = mask_ratio
 
-        self.ds = datasets.TotalDataset(subset_name=['NMFs_CSL', 'SLR500', 'WLASL', 'MS_ASL'])
+        # self.ds = datasets.TotalDataset(subset_name=['NMFs_CSL', 'SLR500', 'WLASL', 'MS_ASL'])
+        self.ds = datasets.TotalDataset(
+            data_root=data_path,
+            subset_name=['ISLGoaNew']
+        )
         self.temporal_crop = augmentations.TemporalRandomCrop(size=input_size, interval=1)
         print('sample length is ', self.__len__())
         print("l_ratio", self.l_ratio)

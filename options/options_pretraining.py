@@ -6,8 +6,8 @@ class opts_SLR():
 
         # feeder
         self.train_feeder_args = {
-            'data_path': '/data/',
-            'num_frame_path': '/data/',
+            'data_path': '/home/nithin/Desktop/ISL_Goa_Data/MASA/Data/ISL_GOA',
+            'num_frame_path': '',
             'l_ratio': [0.1, 1],
             'input_size': 64,
             'mask_ratio':None
